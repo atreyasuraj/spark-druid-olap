@@ -17,18 +17,27 @@
 
 package org.sparklinedata.druid.client
 
+import java.io.File
+
 import org.apache.spark.Logging
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.hive.test.TestHive
 import org.apache.spark.sql.hive.test.TestHive._
 import org.apache.spark.sql.sources.druid.DruidPlanner
-
-import org.scalatest.{fixture, BeforeAndAfterAll}
+import org.apache.spark.sql.types.StructType
+import org.joda.time.Interval
+import org.scalatest.{TestData, fixture, BeforeAndAfterAll}
 import org.sparklinedata.druid.Utils
 import org.sparklinedata.spark.dateTime.Functions._
 
+
 abstract class BaseTest extends fixture.FunSuite with
   fixture.TestDataFixture with BeforeAndAfterAll with Logging {
+
+  val CSV_EXT = ".csv"
+
+  var client : DruidClient = _
 
   val colMapping =
     """{
@@ -145,6 +154,8 @@ abstract class BaseTest extends fixture.FunSuite with
 
   override def beforeAll() = {
 
+    client = new DruidClient("localhost", 8082)
+
     register(TestHive)
     DruidPlanner(TestHive)
 
@@ -168,7 +179,7 @@ abstract class BaseTest extends fixture.FunSuite with
       p_comment string, c_name string , c_address string , c_phone string , c_acctbal double ,
       c_mktsegment string , c_comment string , c_nation string , c_region string)
       USING com.databricks.spark.csv
-      OPTIONS (path "/Users/hbutani/tpch/datascale1/orderLineItemPartSupplierCustomer.small/",
+      OPTIONS (path "/media/suraj/Data/repos/spark-druid-olap/quickstart/tpch/datascale1.sample/orderLineItemPartSupplierCustomer/part-00000",
       header "false", delimiter "|")""".stripMargin
 
     println(cT)
@@ -242,5 +253,48 @@ abstract class BaseTest extends fixture.FunSuite with
     TestHive.setConf(DruidPlanner.DEBUG_TRANSFORMATIONS.key, "false")
   }
 
+  def checkTimeBoundary: String = {
+    client.timeBoundary("tpch").toString
+  }
+
+  def checkEqualSchema(expectedSchema: StructType, resultSchema: StructType): Boolean ={
+    expectedSchema.equals(resultSchema)
+  }
+
+  private def zipWithIndex[T](input: RDD[T]): RDD[(Int, T)] = {
+    val counts = input.mapPartitions{itr => Iterator(itr.size)}.collect()
+    val countSums = counts.scanLeft(0)(_ + _).zipWithIndex.map{case (x, y) => (y, x)}.toMap
+    input.mapPartitionsWithIndex{case (idx, itr) => itr.zipWithIndex.map{case (y, i) =>
+      (i + countSums(idx), y)}
+    }
+  }
+
+  def checkEqualDataFrames(expected: DataFrame, result: DataFrame) : Unit= {
+    checkEqualSchema(expected.schema, result.schema)
+    expected.rdd.cache()
+    result.rdd.cache()
+    val expectedRDD = zipWithIndex(expected.rdd)
+    val resultRDD = zipWithIndex(result.rdd)
+    assert(expectedRDD.count() == resultRDD.count())
+    val unequal = expectedRDD.cogroup(resultRDD).filter{case (idx, (r1, r2)) =>
+      !(r1.isEmpty || r2.isEmpty) && (!(r1.head.toString() == r2.head.toString()))
+    }.collect()
+    assert(unequal === List())
+    expected.rdd.unpersist()
+    result.rdd.unpersist()
+  }
+
+  def loadRefDataFrame(td: TestData) : DataFrame = {
+    val refFileName = this.getClass.getSimpleName + "_" + td.name + CSV_EXT
+    assert(new File(getClass.getResource("/" + refFileName).toURI).exists,
+      "File name " + refFileName + " does not exist in resources dir")
+    assert(checkTimeBoundary == "1993-01-01T00:00:00.000Z/1997-12-31T00:00:01.000Z",
+      "Time boundary in Druid is invalid")
+    val refDataFrame = TestHive.read
+      .format("com.databricks.spark.csv")
+      .option("header", "false")
+      .load(getClass.getResource("/" + refFileName).toString)
+    refDataFrame
+  }
 }
 
