@@ -19,13 +19,31 @@ package org.sparklinedata.druid.client
 
 import org.apache.spark.sql.hive.test.TestHive._
 
-class DataQualityTest extends BaseTest{
+class DataQualityTest extends BaseTest {
 
-  test("baseTableDataQuality"){ td =>
+  test("baseTableDataQuality") { td =>
     val resultDF = sql("select * from orderLineItemPartSupplierBase limit 10")
 
     val refDF = loadRefDataFrame(td)
 
-    checkEqualDataFrames(resultDF,refDF)
+    checkEqualDataFrames(resultDF, refDF)
+  }
+
+  test("indexedDataQuality") { td =>
+    val resultDF = sql("select * from orderLineItemPartSupplier limit 10")
+
+    val refDF = loadRefDataFrame(td)
+
+    checkEqualDataFrames(resultDF, refDF)
+  }
+
+  test("indexedBasicCubeTest") { td =>
+    val resultDF = sql("select l_returnflag, l_linestatus, count(*), sum(l_extendedprice) as s " +
+      "from orderLineItemPartSupplier " +
+      "group by l_returnflag, l_linestatus with cube limit 10")
+
+    val refDF = loadRefDataFrame(td)
+
+    checkEqualDataFrames(resultDF, refDF)
   }
 }
